@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">hide5G</string>
+    <string name="xposed_desc">状态栏定制：隐藏 5G/4G 等网络制式文字，微调 Wi-Fi 与手机信号图标位置、电池与时钟字号、图标间距，并支持自定义图标包。</string>
+
+    <string-array name="xposed_scope">
+        <item>com.android.systemui</item>
+    </string-array>
+</resources>

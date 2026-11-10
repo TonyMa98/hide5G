@@ -1,0 +1,15 @@
+# 构建产物
+/build/*
+!/build/api82.jar
+/release/
+*.apk
+*.idsig
+*.log
+
+# 系统
+.DS_Store
+
+# IDE
+.idea/
+*.iml
+.vscode/
