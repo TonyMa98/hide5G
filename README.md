@@ -21,6 +21,16 @@
 - 系统：ColorOS（Android 13 及以上）；已在 ColorOS 17（Android 17）上实测。
 - 需要 LSPosed；作用域为 `com.android.systemui`。
 
+## 下载
+
+前往 [Releases](https://github.com/TonyMa98/hide5G/releases) 页面获取最新版本，附件包括：
+
+| 文件 | 说明 |
+|---|---|
+| `hide5G-x.x.apk` | 模块安装包 |
+| `icon-pack-xml.zip` | 可直接导入的图标包（应用内「上传图标包」导入） |
+| `icon.ai` | 图标包设计源文件（Adobe Illustrator），供二次修改 |
+
 ## 安装
 
 1. 安装 APK 后，在 LSPosed 管理器中启用 **hide5G** 模块。
