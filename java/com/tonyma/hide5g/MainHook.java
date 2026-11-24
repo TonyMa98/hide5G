@@ -3939,7 +3939,9 @@ public class MainHook implements IXposedHookLoadPackage {
     private static Drawable packDrawable(android.content.res.Resources res, String name) {
         Drawable c = PACK_CACHE.get(name);
         if (c != null) {
-            return c;
+            // 缓存里的只是模板：状态栏和下拉控制中心各有一个电池实例，
+            // 共用同一个 drawable 会把一边的 tint（亮/暗主题色）带到另一边
+            return VecDrawable.dup(c);
         }
         if (PACK_MISS.contains(name)) {
             return null;

@@ -150,6 +150,37 @@ final class VecDrawable extends Drawable {
         if (d instanceof PackLayer.ClipLevelDrawable) {
             return ((PackLayer.ClipLevelDrawable) d).copy();
         }
+        if (d instanceof android.graphics.drawable.ClipDrawable) {
+            android.graphics.drawable.ClipDrawable c = (android.graphics.drawable.ClipDrawable) d;
+            Drawable inner = dup(c.getDrawable());
+            // 包里的进度层统一是"从左往右"填充，这里按同样的语义复刻
+            android.graphics.drawable.ClipDrawable n =
+                    new android.graphics.drawable.ClipDrawable(inner, android.view.Gravity.LEFT,
+                            android.graphics.drawable.ClipDrawable.HORIZONTAL);
+            n.setLevel(c.getLevel());
+            if (c.getAlpha() != 255) {
+                n.setAlpha(c.getAlpha());
+            }
+            return n;
+        }
+        if (d instanceof android.graphics.drawable.LayerDrawable) {
+            android.graphics.drawable.LayerDrawable ld = (android.graphics.drawable.LayerDrawable) d;
+            int n = ld.getNumberOfLayers();
+            Drawable[] kids = new Drawable[n];
+            for (int i = 0; i < n; i++) {
+                kids[i] = dup(ld.getDrawable(i));
+            }
+            android.graphics.drawable.LayerDrawable nl =
+                    new android.graphics.drawable.LayerDrawable(kids);
+            for (int i = 0; i < n; i++) {
+                int id = ld.getId(i);
+                if (id >= 0) {
+                    nl.setId(i, id);
+                }
+            }
+            nl.setLevel(ld.getLevel());
+            return nl;
+        }
         return d;
     }
 
