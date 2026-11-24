@@ -10,7 +10,7 @@ PLATFORM="$SDK/platforms/android-37.0/android.jar"
 API_JAR="build/api82.jar"
 KS="$HOME/.android/hide5g.keystore"
 OUT="release"
-NAME="hide5G-7.0.apk"
+NAME="hide5G-7.1.apk"
 
 for f in "$BT/aapt2" "$BT/d8" "$BT/apksigner" "$BT/zipalign" "$PLATFORM" "$API_JAR"; do
   [ -e "$f" ] || { echo "缺少: $f"; exit 1; }
@@ -31,7 +31,7 @@ echo "==> 2/6 链接资源 + manifest"
   --min-sdk-version 29 \
   --target-sdk-version 36 \
   --version-code 54 \
-  --version-name 7.0 \
+  --version-name 7.1 \
   build/res.zip
 
 echo "==> 3/6 编译 Java"

@@ -171,7 +171,8 @@ public class MainHook implements IXposedHookLoadPackage {
             new java.util.concurrent.atomic.AtomicInteger();
 
     /** 电池画成不透明（默认开，验证后再决定要不要做成设置项）。 */
-    /** 2026-11-07 停用：图标包已提供正确的电池颜色/透明度，不再强制实心覆盖。 */
+    /** 2026-11-24 启用：图标包里的电池是纯 #000000，percent-in 模式下没人上色，
+     *  结果整块被系统的 30% 白 tint 冲淡、数字压在上面看不见 —— 走实心烘焙。 */
     private static volatile boolean batterySolid = false;
 
     private static final java.util.concurrent.atomic.AtomicInteger SOLID_DBG =
@@ -303,6 +304,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     try {
                         Object o = param.thisObject;
                         solidBattery(o);
+                        tintPackBattery(o);
                         if (BATT_DBG.getAndIncrement() > 12) {
                             return;
                         }
@@ -338,10 +340,11 @@ public class MainHook implements IXposedHookLoadPackage {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam p) {
                     try {
+                        Object o = p.thisObject;
+                        tintPackBattery(o);
                         if (DRAW_DBG.getAndIncrement() > 3) {
                             return;
                         }
-                        Object o = p.thisObject;
                         Drawable out = battDrawableObj(o, "outsideDrawable");
                         Drawable fr = battDrawableObj(o, "frameDrawable");
                         log("BATT-DRAW this=" + System.identityHashCode(o)
@@ -482,6 +485,263 @@ public class MainHook implements IXposedHookLoadPackage {
      * 子类的 bgDrawable / progressDrawable 压根没人上色 —— 电量层保持图标包的 #000000。
      * 这里补上：颜色沿用系统的，只把 alpha 提到 FF。
      */
+    /**
+     * 让图标包里的电池三层跟上系统每帧算出来的颜色。
+     *
+     * percent-in（数字在电池里）模式下，子类的 updateDrawableTint 直接 return，
+     * bgDrawable / progressDrawable 没人上色，包里的图会一直保持 XML 里的死色，
+     * 充电变不出绿、低电量变不出红。这里在每次 updateDrawableTint 之后，把
+     * 当前状态的颜色重新贴回包里那三层（只动 PackLayer/VecDrawable 造的图，
+     * 系统自己的 drawable 一律不碰）。
+     */
+    private static final java.util.HashSet<Integer> FIELD_DUMPED = new java.util.HashSet<>();
+
+    /** 一次性把电池 Drawable 的所有字段（含父类）打出来，看还有哪层是系统自绘的。 */
+    private static void dumpBattFields(Object o) {
+        try {
+            int id = System.identityHashCode(o);
+            if (!FIELD_DUMPED.add(id)) {
+                return;
+            }
+            Class<?> c = o.getClass();
+            while (c != null) {
+                for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                    String v;
+                    try {
+                        f.setAccessible(true);
+                        Object val = f.get(o);
+                        if (val instanceof Drawable) {
+                            Drawable d = (Drawable) val;
+                            v = "Drawable:" + d.getClass().getSimpleName()
+                                    + " ink=" + (d instanceof VecDrawable
+                                    ? ((VecDrawable) d).name : "-");
+                        } else if (val instanceof android.graphics.Paint) {
+                            android.graphics.Paint pt = (android.graphics.Paint) val;
+                            v = "Paint:style=" + pt.getStyle() + " stroke=" + pt.getStrokeWidth()
+                                    + " color=" + hexColor(pt.getColor());
+                        } else if (val instanceof android.graphics.Path) {
+                            v = "Path";
+                        } else if (val instanceof Integer) {
+                            v = hexColor((Integer) val);
+                        } else {
+                            v = val == null ? "null" : val.getClass().getSimpleName();
+                        }
+                    } catch (Throwable t) {
+                        v = "?";
+                    }
+                    android.util.Log.e("hide5G", "BATT-FIELD " + c.getSimpleName() + "." + f.getName()
+                            + ":" + f.getType().getSimpleName() + " = " + v);
+                }
+                c = c.getSuperclass();
+            }
+        } catch (Throwable t) {
+            android.util.Log.e("hide5G", "BATT-FIELD dump failed: " + t);
+        }
+    }
+
+    /**
+     * 完全接管电池绘制：系统这版在 draw() 内部每帧重建 insideDrawable（还会自绘胶囊轮廓），
+     * 从外面改字段只生效一帧，所以这里干脆不调 super.draw，按包里的图形自己画三层。
+     *
+     * @return true = 已经画完，调用方应跳过原方法
+     */
+    private static boolean drawOwnBattery(android.graphics.Canvas c, Object o) {
+        try {
+            Drawable bgPack = packDrawable(null, "stat_battery_horizontal_bg");
+            Drawable fillPack = packDrawable(null, "stat_battery_horizontal_progress_bg");
+            if (!(bgPack instanceof VecDrawable) || !(fillPack instanceof VecDrawable)) {
+                return false;
+            }
+            android.graphics.Rect b = new android.graphics.Rect();
+            try {
+                ((Drawable) battDrawableObj(o, "outsideDrawable")).copyBounds(b);
+            } catch (Throwable t) {
+                return false;
+            }
+            if (b.isEmpty()) {
+                return false;
+            }
+            int bg = battInt(o, "backgroundColor");
+            int outline = battInt(o, "outlineColor");
+            int prog = battInt(o, "progressColor");
+            int level = 10000;
+            try {
+                level = battDrawableObj(o, "insideDrawable").getLevel();
+            } catch (Throwable ignored) {
+                // 拿不到就按满格画
+            }
+            // 1) 空槽底
+            Drawable bgd = VecDrawable.dup(bgPack);
+            bgd.setBounds(b);
+            applyPackTint(bgd, bg);
+            bgd.draw(c);
+            // 2) 电量层：按 level 水平裁切
+            Drawable fld = new android.graphics.drawable.ClipDrawable(
+                    VecDrawable.dup(fillPack), android.view.Gravity.LEFT,
+                    android.graphics.drawable.ClipDrawable.HORIZONTAL);
+            fld.setBounds(b);
+            fld.setLevel(level);
+            applyPackTint(fld, prog);
+            fld.draw(c);
+            // 3) 描边（包里给了就画，透明就相当于没有）
+            Drawable frm = packDrawable(null, "stat_battery_horizontal_frame");
+            if (frm instanceof VecDrawable) {
+                Drawable f = VecDrawable.dup(frm);
+                f.setBounds(b);
+                applyPackTint(f, outline);
+                f.draw(c);
+            }
+            if (OWN_DBG.getAndIncrement() < 6) {
+                android.util.Log.e("hide5G", "BATT-OWN draw bounds=" + b.width() + "x" + b.height()
+                        + " level=" + level + " bg=" + hexColor(bg) + " prog=" + hexColor(prog));
+            }
+            return true;
+        } catch (Throwable t) {
+            android.util.Log.e("hide5G", "BATT-OWN failed: " + t);
+            return false;
+        }
+    }
+
+    private static final java.util.concurrent.atomic.AtomicInteger OWN_DBG =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    private static void tintPackBattery(Object o) {
+        if (!batterySolid) {
+            // 这里和 batterySolid 无关，单独走"跟系统实色"策略
+        }
+        try {
+            android.util.Log.e("hide5G", "BATT-TINT enter n=" + TINT_DBG.get()
+                    + " this=" + System.identityHashCode(o));
+            Drawable out = battDrawableObj(o, "outsideDrawable");
+            Drawable frame = battDrawableObj(o, "frameDrawable");
+            Drawable inside = battDrawableObj(o, "insideDrawable");
+            Drawable subBg = battDrawableObj(o, "bgDrawable");
+            Drawable subProg = battDrawableObj(o, "progressDrawable");
+            int bg = battInt(o, "backgroundColor");
+            int outline = battInt(o, "outlineColor");
+            int prog = battInt(o, "progressColor");
+            dumpBattFields(o);
+
+            android.util.Log.e("hide5G", "BATT-TINT colors bg=" + hexColor(bg)
+                    + " outline=" + hexColor(outline) + " prog=" + hexColor(prog)
+                    + " out=" + packCls(out) + " frame=" + packCls(frame)
+                    + " inside=" + packCls(inside)
+                    + " subBg=" + packCls(battDrawableObj(o, "bgDrawable"))
+                    + " subProg=" + packCls(battDrawableObj(o, "progressDrawable"))
+                    + " chg=" + packCls(battDrawableObj(o, "chargingDrawable")));
+            // 填充层现在由包里的 layer-list(ClipDrawable) 自己承担，不再改字段
+            applyPackTint(out, bg);
+            applyPackTint(frame, outline);
+            applyPackTint(inside, prog);
+            applyPackTint(subBg, bg);
+            applyPackTint(subProg, prog);
+            if (TINT_DBG.getAndIncrement() < 8) {
+                log("BATT-TINT bg=" + hexColor(bg) + " outline=" + hexColor(outline)
+                        + " prog=" + hexColor(prog)
+                        + " | out=" + packCls(out) + " frame=" + packCls(frame)
+                        + " inside=" + packCls(inside));
+            }
+        } catch (Throwable ignored) {
+            // ignore
+        }
+    }
+
+    /** 每条电池实例一份的自绘填充层缓存（key = 电池 Drawable 的 identityHash）。 */
+    private static final java.util.HashMap<Integer, Drawable> PACK_FILL =
+            new java.util.HashMap<>();
+
+    /**
+     * 把系统的 insideDrawable（LayerDrawable &gt; ClipDrawable，形状是系统那颗胶囊）
+     * 换成用包里 progress_bg 造的同款裁切图 —— 这样填充轮廓才是用户画的，
+     * 同时保留 level 裁切的语义（ClipDrawable 自己处理 level）。
+     */
+    private static void replacePackFill(Object o, Drawable inside, int prog) {
+        try {
+            if (inside == null) {
+                return;
+            }
+            if (inside instanceof android.graphics.drawable.ClipDrawable) {
+                Drawable inner = ((android.graphics.drawable.ClipDrawable) inside)
+                        .getDrawable();
+                if (inner instanceof VecDrawable) {
+                    return;   // 已经是我们的填充
+                }
+            }
+            Drawable src = packDrawable(null, "stat_battery_horizontal_progress_bg");
+            if (!(src instanceof VecDrawable)) {
+                return;   // 包里没有自定义填充，保持系统那层
+            }
+            Drawable fill = new android.graphics.drawable.ClipDrawable(
+                    VecDrawable.dup(src), android.view.Gravity.LEFT,
+                    android.graphics.drawable.ClipDrawable.HORIZONTAL);
+            fill.setBounds(inside.getBounds());
+            fill.setLevel(inside.getLevel());
+            applyPackTint(fill, prog);
+            battSetDrawable(o, "insideDrawable", fill);
+            android.util.Log.e("hide5G", "BATT-FILL swapped inside -> ClipDrawable(VecDrawable) lvl="
+                    + inside.getLevel());
+        } catch (Throwable t) {
+            android.util.Log.e("hide5G", "BATT-FILL failed: " + t);
+        }
+    }
+
+    /** 反射写回电池 Drawable 的私有字段。 */
+    private static void battSetDrawable(Object o, String name, Drawable d) {
+        Class<?> c = o.getClass();
+        while (c != null) {
+            try {
+                java.lang.reflect.Field f = c.getDeclaredField(name);
+                f.setAccessible(true);
+                f.set(o, d);
+                return;
+            } catch (NoSuchFieldException e) {
+                c = c.getSuperclass();
+            } catch (Throwable t) {
+                return;
+            }
+        }
+    }
+
+    private static final java.util.concurrent.atomic.AtomicInteger TINT_DBG =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /** 只给图标包自己造的 drawable 上色，系统的原图不碰。 */
+    private static void applyPackTint(Drawable d, int color) {
+        if (d == null || color == 0) {
+            return;
+        }
+        if (d instanceof VecDrawable) {
+            VecDrawable v = (VecDrawable) d;
+            if (v.currentTint() != color) {
+                v.setTint(color);
+            }
+        } else if (d instanceof PackLayer.ClipLevelDrawable) {
+            Drawable inner = ((PackLayer.ClipLevelDrawable) d).innerDrawable();
+            if (inner instanceof VecDrawable) {
+                VecDrawable v = (VecDrawable) inner;
+                if (v.currentTint() != color) {
+                    v.setTint(color);
+                }
+            } else {
+                ((PackLayer.ClipLevelDrawable) d).setTint(color);
+            }
+        }
+    }
+
+    private static String packCls(Drawable d) {
+        if (d == null) {
+            return "null";
+        }
+        if (d instanceof VecDrawable) {
+            VecDrawable v = (VecDrawable) d;
+            return "vec:" + v.name + "/" + hexColor(v.currentTint());
+        }
+        if (d instanceof PackLayer.ClipLevelDrawable) {
+            return "clip:" + packCls(((PackLayer.ClipLevelDrawable) d).innerDrawable());
+        }
+        return d.getClass().getSimpleName();
+    }
+
     private static void solidBattery(Object o) {
         if (!batterySolid) {
             return;

@@ -93,8 +93,17 @@ final class PackLayer {
             if (inner == null) {
                 continue;
             }
-            out = new ClipLevelDrawable(inner,
-                    !"vertical".equals(orientation(attr(p, "clipOrientation"))));
+            // 系统这边是按 instanceof LayerDrawable 认层的，所以必须交出真货：
+            // LayerDrawable( ClipDrawable( 包里的矢量 ) )
+            boolean horizontal = !"vertical".equals(orientation(attr(p, "clipOrientation")));
+            Drawable clip = new android.graphics.drawable.ClipDrawable(inner,
+                    horizontal ? android.view.Gravity.LEFT : android.view.Gravity.TOP,
+                    horizontal ? android.graphics.drawable.ClipDrawable.HORIZONTAL
+                            : android.graphics.drawable.ClipDrawable.VERTICAL);
+            android.graphics.drawable.LayerDrawable ld =
+                    new android.graphics.drawable.LayerDrawable(new Drawable[]{clip});
+            ld.setId(0, android.R.id.progress);
+            out = ld;
         }
     }
 
